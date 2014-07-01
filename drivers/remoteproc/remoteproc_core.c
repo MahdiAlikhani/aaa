@@ -41,6 +41,7 @@
 #include <linux/virtio_ids.h>
 #include <linux/virtio_ring.h>
 #include <linux/platform_device.h>
+#include <linux/vmalloc.h>
 #include <asm/byteorder.h>
 
 #include "remoteproc_internal.h"
@@ -55,6 +56,8 @@ static DEFINE_IDA(rproc_dev_index);
 
 static const char * const rproc_crash_names[] = {
 	[RPROC_MMUFAULT]	= "mmufault",
+	[RPROC_WATCHDOG]	= "watchdog",
+	[RPROC_EXCEPTION]	= "device exception",
 };
 
 /* translate rproc_crash_type to string */
@@ -423,6 +426,103 @@ free_rvdev:
 }
 
 /**
+ * rproc_handle_last_trace() - setup a buffer to capture the trace snapshot
+ *				before recovery
+ * @rproc: the remote processor
+ * @trace: the trace resource descriptor
+ * @count: the index of the trace under process
+ *
+ * The last trace is allocated and the contents of the trace buffer are
+ * copied during a recovery cleanup. Once, the contents get copied, the
+ * trace buffers are cleaned up for re-use.
+ *
+ * It might also happen that the remoteproc binary changes between the
+ * time that it was loaded and the time that it crashed. In this case,
+ * the trace descriptors might have changed too. The last traces are
+ * re-built as required in this case.
+ *
+ * Returns 0 on success, or an appropriate error code otherwise
+ */
+static int rproc_handle_last_trace(struct rproc *rproc,
+				struct rproc_mem_entry *trace, int count)
+{
+	struct rproc_mem_entry *trace_last, *tmp_trace;
+	struct device *dev = &rproc->dev;
+	char name[15];
+	int i = 0;
+	bool new_trace = false;
+
+	if (!rproc || !trace)
+		return -EINVAL;
+
+	/* we need a new trace in this case */
+	if (count > rproc->num_last_traces) {
+		new_trace = true;
+		/*
+		 * make sure snprintf always null terminates, even if truncating
+		 */
+		snprintf(name, sizeof(name), "trace%d_last", (count - 1));
+		trace_last = kzalloc(sizeof(*trace_last), GFP_KERNEL);
+		if (!trace_last) {
+			dev_err(dev, "kzalloc failed for trace%d_last\n",
+				count);
+			return -ENOMEM;
+		}
+	} else {
+		/* try to reuse buffers here */
+		list_for_each_entry_safe(trace_last, tmp_trace,
+					 &rproc->last_traces, node) {
+			if (++i == count)
+				break;
+		}
+
+		/* if we can reuse the trace, copy buffer and exit */
+		if (trace_last->len == trace->len)
+			goto copy_and_exit;
+
+		/* can reuse the trace struct but not the buffer */
+		vfree(trace_last->va);
+		trace_last->va = NULL;
+		trace_last->len = 0;
+	}
+
+	trace_last->len = trace->len;
+	trace_last->va = vmalloc(sizeof(u32) * trace_last->len);
+	if (!trace_last->va) {
+		dev_err(dev, "vmalloc failed for trace%d_last\n", count);
+		if (!new_trace) {
+			list_del(&trace_last->node);
+			rproc->num_last_traces--;
+		}
+		kfree(trace_last);
+		return -ENOMEM;
+	}
+
+	/* create the debugfs entry */
+	if (new_trace) {
+		trace_last->priv = rproc_create_trace_file(name, rproc,
+				trace_last);
+		if (!trace_last->priv) {
+			dev_err(dev, "trace%d_last create debugfs failed\n",
+				count);
+			vfree(trace_last->va);
+			kfree(trace_last);
+			return -EINVAL;
+		}
+
+		/* add it to the trace list */
+		list_add_tail(&trace_last->node, &rproc->last_traces);
+		rproc->num_last_traces++;
+	}
+
+copy_and_exit:
+	/* copy the trace to last trace */
+	memcpy(trace_last->va, trace->va, trace->len);
+
+	return 0;
+}
+
+/**
  * rproc_handle_trace() - handle a shared trace buffer resource
  * @rproc: the remote processor
  * @rsc: the trace resource descriptor
@@ -728,6 +828,78 @@ free_carv:
 	return ret;
 }
 
+/**
+ * rproc_handle_intmem() - handle internal memory resource entry
+ * @rproc: rproc handle
+ * @rsc: the intmem resource entry
+ * @offset: offset of the resource data in resource table
+ * @avail: size of available data (for image validation)
+ *
+ * This function will handle firmware requests for mapping a memory region
+ * internal to a remote processor into kernel. It neither allocates any
+ * physical pages, nor performs any iommu mapping, as this resource entry
+ * is primarily used for representing physical internal memories. If the
+ * internal memory region can only be accessed through an iommu, please
+ * use a devmem resource entry.
+ *
+ * These resource entries should be grouped near the carveout entries in
+ * the firmware's resource table, as other firmware entries might request
+ * placing other data objects inside these memory regions (e.g. data/code
+ * segments, trace resource entries, ...).
+ */
+static int rproc_handle_intmem(struct rproc *rproc, struct fw_rsc_intmem *rsc,
+							int offset, int avail)
+{
+	struct rproc_mem_entry *carveout;
+	struct device *dev = &rproc->dev;
+	void *va;
+	int ret;
+
+	if (sizeof(*rsc) > avail) {
+		dev_err(dev, "intmem rsc is truncated\n");
+		return -EINVAL;
+	}
+
+	/* make sure reserved bytes are zeroes */
+	if (rsc->reserved[0] || rsc->reserved[1]) {
+		dev_err(dev, "intmem rsc has non zero reserved bytes\n");
+		return -EINVAL;
+	}
+
+	dev_dbg(dev, "intmem rsc: da 0x%x, pa 0x%x, len 0x%x\n",
+		rsc->da, rsc->pa, rsc->len);
+
+	carveout = kzalloc(sizeof(*carveout), GFP_KERNEL);
+	if (!carveout) {
+		dev_err(dev, "kzalloc carveout failed\n");
+		return -ENOMEM;
+	}
+
+	va = (__force void *)ioremap_nocache(rsc->pa, rsc->len);
+	if (!va) {
+		dev_err(dev, "ioremap_nocache err: %d\n", rsc->len);
+		ret = -ENOMEM;
+		goto free_carv;
+	}
+
+	dev_dbg(dev, "intmem mapped pa 0x%x of len 0x%x into kernel va %p\n",
+		rsc->pa, rsc->len, va);
+
+	carveout->va = va;
+	carveout->len = rsc->len;
+	carveout->dma = rsc->pa;
+	carveout->da = rsc->da;
+	carveout->priv = (void *)1;    /* prevents freeing */
+
+	list_add_tail(&carveout->node, &rproc->carveouts);
+
+	return 0;
+
+free_carv:
+	kfree(carveout);
+	return ret;
+}
+
 static int rproc_count_vrings(struct rproc *rproc, struct fw_rsc_vdev *rsc,
 			      int offset, int avail)
 {
@@ -745,6 +917,7 @@ static rproc_handle_resource_t rproc_loading_handlers[RSC_LAST] = {
 	[RSC_CARVEOUT] = (rproc_handle_resource_t)rproc_handle_carveout,
 	[RSC_DEVMEM] = (rproc_handle_resource_t)rproc_handle_devmem,
 	[RSC_TRACE] = (rproc_handle_resource_t)rproc_handle_trace,
+	[RSC_INTMEM] = (rproc_handle_resource_t)rproc_handle_intmem,
 	[RSC_VDEV] = NULL, /* VDEVs were handled upon registrarion */
 };
 
@@ -810,6 +983,18 @@ rproc_handle_fw_version(struct rproc *rproc, const char *version, int versz)
 }
 
 /**
+ * rproc_free_last_trace() - helper function to cleanup a last trace entry
+ * @trace: the last trace element to be cleaned up
+ */
+static void rproc_free_last_trace(struct rproc_mem_entry *trace)
+{
+	rproc_remove_trace_file(trace->priv);
+	list_del(&trace->node);
+	vfree(trace->va);
+	kfree(trace);
+}
+
+/**
  * rproc_resource_cleanup() - clean up and free all acquired resources
  * @rproc: rproc handle
  *
@@ -820,13 +1005,31 @@ static void rproc_resource_cleanup(struct rproc *rproc)
 {
 	struct rproc_mem_entry *entry, *tmp;
 	struct device *dev = &rproc->dev;
+	int count = 0, i = rproc->num_traces;
 
 	/* clean up debugfs trace entries */
 	list_for_each_entry_safe(entry, tmp, &rproc->traces, node) {
+		/* handle last trace here */
+		if (rproc->state == RPROC_CRASHED)
+			rproc_handle_last_trace(rproc, entry, ++count);
+
 		rproc_remove_trace_file(entry->priv);
-		rproc->num_traces--;
 		list_del(&entry->node);
 		kfree(entry);
+	}
+	rproc->num_traces = 0;
+
+	/*
+	 * clean up debugfs last trace entries. This either deletes all last
+	 * trace entries during cleanup or just the remaining entries, if any,
+	 * in case of a crash.
+	 */
+	list_for_each_entry_safe(entry, tmp, &rproc->last_traces, node) {
+		/* skip the valid traces */
+		if ((i--) && (rproc->state == RPROC_CRASHED))
+			continue;
+		rproc_free_last_trace(entry);
+		rproc->num_last_traces--;
 	}
 
 	/* clean up iommu mapping entries */
@@ -849,8 +1052,12 @@ static void rproc_resource_cleanup(struct rproc *rproc)
 
 	/* clean up carveout allocations */
 	list_for_each_entry_safe(entry, tmp, &rproc->carveouts, node) {
-		dma_free_coherent(dev->parent, entry->len, entry->va,
-								entry->dma);
+		if (!entry->priv)
+			dma_free_coherent(dev->parent, entry->len, entry->va,
+					  entry->dma);
+		else
+			iounmap((__force void __iomem *)entry->va);
+
 		list_del(&entry->node);
 		kfree(entry);
 	}
@@ -1333,8 +1540,15 @@ EXPORT_SYMBOL(rproc_add);
 static void rproc_type_release(struct device *dev)
 {
 	struct rproc *rproc = container_of(dev, struct rproc, dev);
+	struct rproc_mem_entry *entry, *tmp;
 
 	dev_info(&rproc->dev, "releasing %s\n", rproc->name);
+
+	/* clean up debugfs last trace entries */
+	list_for_each_entry_safe(entry, tmp, &rproc->last_traces, node) {
+		rproc_free_last_trace(entry);
+		rproc->num_last_traces--;
+	}
 
 	rproc_delete_debug_dir(rproc);
 
@@ -1441,6 +1655,7 @@ struct rproc *rproc_alloc(struct device *dev, const char *name,
 	INIT_LIST_HEAD(&rproc->carveouts);
 	INIT_LIST_HEAD(&rproc->mappings);
 	INIT_LIST_HEAD(&rproc->traces);
+	INIT_LIST_HEAD(&rproc->last_traces);
 	INIT_LIST_HEAD(&rproc->rvdevs);
 
 	INIT_WORK(&rproc->crash_handler, rproc_crash_handler_work);

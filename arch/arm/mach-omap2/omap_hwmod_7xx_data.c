@@ -499,7 +499,6 @@ static struct omap_hwmod dra7xx_dsp1_hwmod = {
 			.clkctrl_offs = DRA7XX_CM_DSP1_DSP1_CLKCTRL_OFFSET,
 			.rstctrl_offs = DRA7XX_RM_DSP1_RSTCTRL_OFFSET,
 			.context_offs = DRA7XX_RM_DSP1_DSP1_CONTEXT_OFFSET,
-			.modulemode   = MODULEMODE_HWCTRL,
 		},
 	},
 };
@@ -517,7 +516,6 @@ static struct omap_hwmod dra7xx_dsp2_hwmod = {
 			.clkctrl_offs = DRA7XX_CM_DSP2_DSP2_CLKCTRL_OFFSET,
 			.rstctrl_offs = DRA7XX_RM_DSP2_RSTCTRL_OFFSET,
 			.context_offs = DRA7XX_RM_DSP2_DSP2_CONTEXT_OFFSET,
-			.modulemode   = MODULEMODE_HWCTRL,
 		},
 	},
 };
@@ -1329,7 +1327,6 @@ static struct omap_hwmod dra7xx_ipu1_hwmod = {
 			.clkctrl_offs = DRA7XX_CM_IPU1_IPU1_CLKCTRL_OFFSET,
 			.rstctrl_offs = DRA7XX_RM_IPU1_RSTCTRL_OFFSET,
 			.context_offs = DRA7XX_RM_IPU1_IPU1_CONTEXT_OFFSET,
-			.modulemode   = MODULEMODE_HWCTRL,
 		},
 	},
 #ifdef CONFIG_OMAP_REMOTEPROC_LATE_ATTACH_IPU1
@@ -1350,7 +1347,6 @@ static struct omap_hwmod dra7xx_ipu2_hwmod = {
 			.clkctrl_offs = DRA7XX_CM_IPU2_IPU2_CLKCTRL_OFFSET,
 			.rstctrl_offs = DRA7XX_RM_IPU2_RSTCTRL_OFFSET,
 			.context_offs = DRA7XX_RM_IPU2_IPU2_CONTEXT_OFFSET,
-			.modulemode   = MODULEMODE_HWCTRL,
 		},
 	},
 #ifdef CONFIG_OMAP_REMOTEPROC_LATE_ATTACH_IPU2
@@ -2120,10 +2116,18 @@ static struct omap_hwmod dra7xx_mmu_ipu2_hwmod = {
 };
 
 /* DSP MMUs */
-static struct omap_mmu_dev_attr dra7xx_mmu_dsp_dev_attr = {
+static struct omap_mmu_dev_attr dra7xx_mmu0_dsp_dev_attr = {
 	.da_start	= 0x20000000,
 	.da_end		= 0xfffff000,
 	.nr_tlb_entries = 32,
+	.index		= 0,
+};
+
+static struct omap_mmu_dev_attr dra7xx_mmu1_dsp_dev_attr = {
+	.da_start	= 0x20000000,
+	.da_end		= 0xfffff000,
+	.nr_tlb_entries = 32,
+	.index		= 1,
 };
 
 static struct omap_hwmod_rst_info dra7xx_mmu_dsp_resets[] = {
@@ -2152,7 +2156,7 @@ static struct omap_hwmod dra7xx_mmu0_dsp1_hwmod = {
 			.modulemode   = MODULEMODE_HWCTRL,
 		},
 	},
-	.dev_attr	= &dra7xx_mmu_dsp_dev_attr,
+	.dev_attr	= &dra7xx_mmu0_dsp_dev_attr,
 };
 
 /* mmu1 - dsp1 */
@@ -2167,8 +2171,6 @@ static struct omap_hwmod dra7xx_mmu1_dsp1_hwmod = {
 	.class		= &dra7xx_mmu_hwmod_class,
 	.clkdm_name	= "dsp1_clkdm",
 	.mpu_irqs	= dra7xx_mmu1_dsp1_irqs,
-	.rst_lines	= dra7xx_mmu_dsp_resets,
-	.rst_lines_cnt	= ARRAY_SIZE(dra7xx_mmu_dsp_resets),
 	.main_clk	= "dpll_dsp_m2_ck",
 	.prcm = {
 		.omap4 = {
@@ -2178,7 +2180,7 @@ static struct omap_hwmod dra7xx_mmu1_dsp1_hwmod = {
 			.modulemode   = MODULEMODE_HWCTRL,
 		},
 	},
-	.dev_attr	= &dra7xx_mmu_dsp_dev_attr,
+	.dev_attr	= &dra7xx_mmu1_dsp_dev_attr,
 };
 
 /* mmu0 - dsp2 */
@@ -2204,7 +2206,7 @@ static struct omap_hwmod dra7xx_mmu0_dsp2_hwmod = {
 			.modulemode   = MODULEMODE_HWCTRL,
 		},
 	},
-	.dev_attr	= &dra7xx_mmu_dsp_dev_attr,
+	.dev_attr	= &dra7xx_mmu0_dsp_dev_attr,
 };
 
 /* mmu1 - dsp2 */
@@ -2219,8 +2221,6 @@ static struct omap_hwmod dra7xx_mmu1_dsp2_hwmod = {
 	.class		= &dra7xx_mmu_hwmod_class,
 	.clkdm_name	= "dsp2_clkdm",
 	.mpu_irqs	= dra7xx_mmu1_dsp2_irqs,
-	.rst_lines	= dra7xx_mmu_dsp_resets,
-	.rst_lines_cnt	= ARRAY_SIZE(dra7xx_mmu_dsp_resets),
 	.main_clk	= "dpll_dsp_m2_ck",
 	.prcm = {
 		.omap4 = {
@@ -2230,7 +2230,7 @@ static struct omap_hwmod dra7xx_mmu1_dsp2_hwmod = {
 			.modulemode   = MODULEMODE_HWCTRL,
 		},
 	},
-	.dev_attr	= &dra7xx_mmu_dsp_dev_attr,
+	.dev_attr	= &dra7xx_mmu1_dsp_dev_attr,
 };
 
 /*
