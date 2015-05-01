@@ -501,7 +501,7 @@ int rppc_xlate_buffers(struct rppc_instance *rpc, struct rppc_function *func,
 	int i, limit, inc = 1;
 	virt_addr_t kva, uva, buva;
 	phys_addr_t rda;
-	int ret = 0;
+	int ret = 0, final_ret = 0;
 	int xlate_fd;
 
 	limit = func->num_translations;
@@ -658,6 +658,12 @@ unwind:
 			dev_err(dev, "error during UVA to RDA translations!! current translation = %d\n",
 					i);
 		}
+		/*
+		 * store away the return value to return back to caller
+		 * in case of an error, record only the first error
+		 */
+		if (!final_ret)
+			final_ret = ret;
 	}
 
 	/*
@@ -670,5 +676,5 @@ unwind:
 		mutex_unlock(&rpc->lock);
 	}
 
-	return ret;
+	return final_ret;
 }
